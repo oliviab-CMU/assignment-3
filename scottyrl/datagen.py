@@ -32,8 +32,11 @@ def extension_suffix(accumulated: list[int], prompt_tokens: list[int]) -> list[i
         extension_suffix([1, 2, 3], [1, 2])          -> None
         extension_suffix([], [1, 2])                 -> [1, 2]  (an empty sequence is a prefix of anything)
     """
-    # TODO(student): implement this function.
-    raise NotImplementedError
+    if len(prompt_tokens) < len(accumulated):
+        return None
+    if prompt_tokens[: len(accumulated)] != accumulated:
+        return None
+    return prompt_tokens[len(accumulated) :]
 
 
 def stitch_trajectory(traj: Trajectory) -> list[TokenSequence]:
@@ -78,8 +81,58 @@ def stitch_trajectory(traj: Trajectory) -> list[TokenSequence]:
 
     Returns: list of TokenSequence (possibly empty).
     """
-    # TODO(student): implement this function.
-    raise NotImplementedError
+
+    def finalize(tokens: list[int], status: list[int], logprobs: list[float]) -> TokenSequence | None:
+        """Emit the accumulated sequence if it is trainable, else None.
+
+        `status`/`logprobs` are per-token (entry i describes tokens[i]);
+        target position j describes tokens[j+1], so shift by one.
+        """
+        if len(tokens) < 2 or not any(status):
+            return None
+        return TokenSequence(
+            tokens=list(tokens),
+            mask=list(status[1:]),
+            logprobs=list(logprobs[1:]),
+            advantages=[0.0] * (len(tokens) - 1),
+        )
+
+    def append_completion(tokens: list[int], status: list[int], logprobs: list[float], call) -> None:
+        """Append a call's completion tokens, marking them as actions."""
+        tokens.extend(call.completion_tokens)
+        for lp in call.completion_logprobs:
+            status.append(1)
+            logprobs.append(lp)
+
+    def append_context(tokens: list[int], status: list[int], logprobs: list[float], suffix: list[int]) -> None:
+        """Append context (prompt tail) tokens, not trained on."""
+        tokens.extend(suffix)
+        status.extend([0] * len(suffix))
+        logprobs.extend([0.0] * len(suffix))
+
+    sequences: list[TokenSequence] = []
+    tokens: list[int] = []
+    status: list[int] = []
+    logprobs: list[float] = []
+
+    for call in traj.calls:
+        suffix = extension_suffix(tokens, call.prompt_tokens) if tokens else call.prompt_tokens
+        if suffix is None:
+            # Extension broken: end the current sequence, restart from this
+            # call's full prompt.
+            seq = finalize(tokens, status, logprobs)
+            if seq is not None:
+                sequences.append(seq)
+            tokens, status, logprobs = [], [], []
+            append_context(tokens, status, logprobs, call.prompt_tokens)
+        else:
+            append_context(tokens, status, logprobs, suffix)
+        append_completion(tokens, status, logprobs, call)
+
+    seq = finalize(tokens, status, logprobs)
+    if seq is not None:
+        sequences.append(seq)
+    return sequences
 
 
 def trajectory_to_training_sequences(traj: Trajectory, advantage: float) -> list[TokenSequence]:
@@ -88,5 +141,9 @@ def trajectory_to_training_sequences(traj: Trajectory, advantage: float) -> list
     position stays 0.0. (In REINFORCE/GRPO, all tokens the policy generated
     in an episode share the episode-level advantage.)
     """
-    # TODO(student): implement this function.
-    raise NotImplementedError
+    sequences = stitch_trajectory(traj)
+    for seq in sequences:
+        for j, m in enumerate(seq.mask):
+            if m == 1:
+                seq.advantages[j] = float(advantage)
+    return sequences
