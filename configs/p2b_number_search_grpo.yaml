@@ -27,4 +27,4 @@ train:
   resume: false               # --set train.resume=true to continue after a crash
   resume_save_every: 10       # resumable checkpoint every N optimizer steps
   trajectory_log_every: 5     # full transcripts every N steps under runs/
-  # wandb_project: 11768-a3   # uncomment (or --set) to enable wandb
+  wandb_project: assignment-3-agents
