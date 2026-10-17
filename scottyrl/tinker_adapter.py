@@ -336,8 +336,18 @@ class TinkerSession:
         """
         import tinker
 
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        # Submit both operations before resolving either result: Tinker
+        # batches back-to-back requests into one server cycle, so awaiting
+        # the forward result first would serialize the two operations.
+        fwd_future = await self.training_client.forward_backward_async(
+            datums, loss_fn=loss_fn
+        )
+        opt_future = await self.training_client.optim_step_async(
+            tinker.AdamParams(learning_rate=lr, grad_clip_norm=grad_clip_norm)
+        )
+        fwd_result = await fwd_future.result_async()
+        opt_result = await opt_future.result_async()
+        return fwd_result, opt_result
 
     async def train_step(
         self,
