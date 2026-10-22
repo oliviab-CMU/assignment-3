@@ -291,8 +291,21 @@ class AsyncGRPOTrainer:
         describe the snapshot captured by a rollout worker.  Do not replace
         them with whatever happens to be current after rollout work awaits.
         """
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        task = self.tasks_by_id[task_id]
+        trajectories = await collect_group(
+            policy,
+            task,
+            self.env_factory,
+            self.cfg.group_size,
+            agent_cls=self.agent_cls(),
+        )
+        sequences, _ = groups_to_batch([trajectories], method="grpo")
+        return GroupResult(
+            task_id=task_id,
+            policy_version=version,
+            sequences=sequences,
+            rewards=[trajectory.reward for trajectory in trajectories],
+        )
 
     async def rollout_worker(
         self,
@@ -307,8 +320,14 @@ class AsyncGRPOTrainer:
 
         Do not catch errors here, let them propagate.
         """
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        while True:
+            task_id = next(task_iter)
+            # One capture per group: the version stays correct even if a new
+            # policy is published while this group is still rolling out.
+            policy, version = self.active_policy()
+            group = await self.generate_group(task_id, policy, version)
+            # Bounded queue: a full queue pauses this worker (backpressure).
+            await results.put(group)
 
     async def collect_fresh_batch(
         self,
@@ -328,8 +347,55 @@ class AsyncGRPOTrainer:
         ``tasks_per_batch`` groups per step and lets degenerate ones
         contribute no sequences.
         """
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        fresh: list[GroupResult] = []
+        dropped = 0
+        while len(fresh) < self.cfg.groups_per_batch:
+            group = await self._next_result(results)
+            if self.version - group.policy_version > self.cfg.max_staleness:
+                dropped += 1
+                continue
+            fresh.append(group)
+        if dropped:
+            stats["groups_dropped_stale"] = (
+                stats.get("groups_dropped_stale", 0) + dropped
+            )
+        return fresh
+
+    async def _next_result(self, results: asyncio.Queue[GroupResult]) -> GroupResult:
+        """Wait for the next queued group, or fail if a background task died.
+
+        Waiting only on the queue would deadlock when a rollout worker or an
+        evaluation task fails: the result it owed us can never arrive. So
+        every wait also watches the outstanding background tasks and raises
+        the first failure.
+
+        The queue getter is created once and reused: cancelling and recreating
+        it on every wakeup could drop an already-queued group. It is only
+        abandoned when we are about to raise, where losing a group no longer
+        matters because the run is ending.
+        """
+        getter = asyncio.ensure_future(results.get())
+        try:
+            while True:
+                failure = self._pending_failure(self._background_tasks())
+                if failure is not None:
+                    raise failure
+                monitored = [t for t in self._background_tasks() if not t.done()]
+                if not monitored:
+                    return await getter
+                await asyncio.wait(
+                    [getter, *monitored], return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter.done():
+                    return getter.result()
+                # A background task finished; loop to see whether it failed.
+        finally:
+            if not getter.done():
+                getter.cancel()
+
+    def _background_tasks(self) -> list[asyncio.Task]:
+        """Worker and evaluation tasks the learner must not outlive unnoticed."""
+        return [*getattr(self, "_worker_tasks", ()), *getattr(self, "_eval_tasks", ())]
 
     async def update(self, batch: list[GroupResult]) -> dict:
         """Run one optimizer step on the training sequences of every group
@@ -344,8 +410,13 @@ class AsyncGRPOTrainer:
         (the given ``record_training``) belong to ``train()``, not to this
         method.
         """
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        sequences = [sequence for group in batch for sequence in group.sequences]
+        return await self.session.train_step(
+            sequences,
+            loss_fn=self.cfg.loss_fn,
+            lr=self.cfg.lr,
+            grad_clip_norm=self.cfg.grad_clip_norm,
+        )
 
     async def evaluate_now(self, policy: TinkerPolicy) -> dict:
         """Evaluate ``policy`` on held-out validation tasks.
@@ -361,8 +432,36 @@ class AsyncGRPOTrainer:
         ``run_evaluation`` and ``record_evaluation``.  The entry script
         also calls this method for the step-0 baseline.
         """
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        return await evaluate_policy(
+            policy,
+            self.val_tasks[: self.cfg.eval_tasks],
+            self.env_factory,
+            k=self.cfg.eval_k,
+            agent_cls=self.agent_cls(),
+        )
+
+    async def _cancel(self, tasks: list[asyncio.Task]) -> None:
+        """Cancel the outstanding tasks and wait for them to settle."""
+        pending = [task for task in tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _pending_failure(self, tasks: list[asyncio.Task]) -> BaseException | None:
+        """First real failure among finished tasks, retrieving every result.
+
+        Retrieving each task's exception also stops asyncio from printing
+        "Task exception was never retrieved" for the ones we do not raise.
+        """
+        failure: BaseException | None = None
+        for task in tasks:
+            if not task.done() or task.cancelled():
+                continue
+            error = task.exception()
+            if error is not None and failure is None:
+                failure = error
+        return failure
 
     # ------------------------------------------------------------- driver --
 
@@ -420,5 +519,65 @@ class AsyncGRPOTrainer:
         See the module-level Queue notes and the official task-cancellation
         guidance: https://docs.python.org/3/library/asyncio-task.html#task-cancellation
         """
-        # TODO(student): implement this method.
-        raise NotImplementedError
+        # Workers read self.policy, so it must exist before they start.
+        await self.publish_policy(0)
+
+        results: asyncio.Queue[GroupResult] = asyncio.Queue(
+            maxsize=self.cfg.queue_capacity
+        )
+        stats = {
+            "train_steps": 0,
+            "groups_consumed": 0,
+            "groups_dropped_stale": 0,
+        }
+        # One repeating stream shared by every worker: each next() takes the
+        # following task id, so workers spread over the task list. next() is
+        # synchronous, so no two workers can take the same id.
+        task_iter = itertools.cycle(task.id for task in self.train_tasks)
+        self._worker_tasks = [
+            asyncio.create_task(self.rollout_worker(results, task_iter))
+            for _ in range(self.cfg.num_workers)
+        ]
+        self._eval_tasks: list[asyncio.Task] = []
+
+        try:
+            for step in range(1, self.cfg.num_steps + 1):
+                batch = await self.collect_fresh_batch(results, stats)
+                stats["groups_consumed"] += len(batch)
+                stats["train_steps"] = step
+                if any(group.sequences for group in batch):
+                    train_metrics = await self.update(batch)
+                    # The next version is the one the next batches must use;
+                    # workers pick it up from active_policy().
+                    await self.publish_policy(self.version + 1)
+                else:
+                    # Every group degenerate: no update, no publish, so the
+                    # version does not advance and the step is a skipped one.
+                    train_metrics = {}
+                self.record_training(step, batch, train_metrics)
+                if self.eval_due(step):
+                    # Capture the pair now: the evaluation measures the policy
+                    # this step produced, even if newer versions appear while
+                    # it runs.
+                    policy, version = self.active_policy()
+                    self._eval_tasks.append(
+                        asyncio.create_task(
+                            self.run_evaluation(policy, version, step)
+                        )
+                    )
+            # Rollouts are no longer needed; a worker that stops from this
+            # cancellation is not an error. A real failure must still surface.
+            await self._cancel(self._worker_tasks)
+            failure = self._pending_failure(self._worker_tasks)
+            if failure is not None:
+                raise failure
+            # Evaluations were started without blocking training; wait for
+            # them so their records land before train() returns.
+            if self._eval_tasks:
+                await asyncio.gather(*self._eval_tasks)
+        except BaseException:
+            # Re-raise the original object: no ExceptionGroup, no wrapper.
+            await self._cancel(self._eval_tasks)
+            await self._cancel(self._worker_tasks)
+            raise
+        return stats
