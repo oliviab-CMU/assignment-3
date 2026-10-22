@@ -84,13 +84,12 @@ fingerprint of synchronous on-policy training: every batch was sampled by the
 very policy that then trained on it. The tails confirm it — the per-step
 minimum and maximum stay within roughly 0.53–1.48 (`p2a`) and 0.55–2.29 (`p2b`),
 the ordinary spread of a single sampling draw, and the per-step std stays
-between 0.013 and 0.032. In
-the asynchronous Part 3 run those tails widen measurably, which is the contrast
-that makes this diagnostic worth plotting. If sampled log-probabilities were
-attached to the wrong tokens, the mean would drift away from 1.0; it does not,
-so this is the cleanest available check that the masking and log-prob alignment
-work. No episodes were abandoned in either run, and the p2a run never had a
-batch with nothing to learn from.
+between 0.013 and 0.032. In the asynchronous Part 3 run those tails widen
+measurably, which is the contrast that makes this diagnostic worth plotting. If
+sampled log-probabilities were attached to the wrong tokens, the mean would
+drift away from 1.0; it does not, so this is the cleanest available check that
+the masking and log-prob alignment work. No episodes were abandoned in either
+run, and the p2a run never had a batch with nothing to learn from.
 
 **GRPO learns much faster and much further.** It goes from 42% to 93% held-out
 success in the first 10 steps and reaches ~99% by step 20, while REINFORCE only

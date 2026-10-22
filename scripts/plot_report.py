@@ -6,7 +6,7 @@ one multi-panel figure covering the four required diagnostic families:
   reward     train/success_rate, eval/success_rate, and every logged
              train/pass@* and eval/pass@* curve (labelled by exact key)
   optim      train/grad_norm
-  drift      train/importance_weight_{mean,max,std}
+  drift      train/importance_weight_{mean,min,max,std}
   health     train/frac_degenerate_groups and train/entropy_proxy
 
 Health is split into two panels rather than sharing a second y-axis: two
