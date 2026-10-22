@@ -61,6 +61,20 @@ def series(steps: dict[int, dict], key: str) -> tuple[list, list]:
     return xs, [steps[s][key] for s in xs]
 
 
+def series_with_gaps(steps: dict[int, dict], key: str) -> tuple[list, list]:
+    """Series for a per-step metric, with NaN where a step has no record.
+
+    A train metric is expected on every training step, so a missing step is
+    real information (the batch was skipped, or the update did not run) and
+    the line must break there rather than bridge across it. Eval metrics are
+    sampled only every `eval_every` steps and are plotted as sparse points.
+    """
+    if not key.startswith("train/"):
+        return series(steps, key)
+    xs = sorted(steps)
+    return xs, [steps[s].get(key, float("nan")) for s in xs]
+
+
 def all_keys(steps: dict[int, dict]) -> set[str]:
     keys: set[str] = set()
     for record in steps.values():
@@ -69,7 +83,9 @@ def all_keys(steps: dict[int, dict]) -> set[str]:
 
 
 def _style(ax, title: str, ylabel: str, ylim: tuple[float, float] | None = None) -> None:
-    ax.set_title(title, color=INK, fontsize=10, loc="left")
+    # The title sits above the axes rather than inside them, leaving the
+    # reserved band free for the legend placed by _legend().
+    ax.set_title(title, color=INK, fontsize=10, loc="left", pad=34)
     ax.set_xlabel("training step", color=INK_SECONDARY, fontsize=9)
     ax.set_ylabel(ylabel, color=INK_SECONDARY, fontsize=9)
     ax.tick_params(colors=INK_SECONDARY, labelsize=8)
@@ -83,33 +99,64 @@ def _style(ax, title: str, ylabel: str, ylim: tuple[float, float] | None = None)
         ax.set_ylim(*ylim)
 
 
+def _legend(ax, ncol: int = 2) -> None:
+    """Legend in its own band above the axes, never over data or the title.
+
+    Two columns by default so the band is at most two rows tall; the title
+    is padded above the whole band. Placing the legend outside the axes also
+    keeps it from hiding points at the start of a curve, which is where the
+    interesting baseline values sit.
+    """
+    ax.legend(
+        fontsize=7, frameon=False, labelcolor=INK_SECONDARY,
+        loc="lower left", bbox_to_anchor=(0, 1.005), ncol=ncol,
+        borderaxespad=0, handlelength=2.2, columnspacing=1.4,
+    )
+
+
 def _draw(ax, steps: dict[int, dict], keys: list[str], style_offset: int = 0) -> None:
     for i, key in enumerate(keys):
-        xs, ys = series(steps, key)
+        xs, ys = series_with_gaps(steps, key)
         if not xs:
             continue
         color, ls, marker = SERIES_STYLE[(i + style_offset) % len(SERIES_STYLE)]
+        # Markers show where records actually exist; NaN gaps break the line
+        # instead of bridging across skipped steps.
         ax.plot(
-            xs, ys, color=color, linestyle=ls, linewidth=1.6,
-            marker=marker, markersize=3.5, label=key,
+            xs, ys, color=color, linestyle=ls, linewidth=1.4,
+            marker=marker, markersize=3.2, label=key,
         )
 
 
 def reward_keys(steps: dict[int, dict]) -> list[str]:
-    """Exact pass@ keys, so training and evaluation k values stay distinct."""
-    return [
+    """Exact pass@ keys, so training and evaluation k values stay distinct.
+
+    A series identical to an earlier one is dropped: with G=1, train success
+    rate *is* train/pass@1, so plotting both would hide one line under the
+    other and add a redundant legend entry.
+    """
+    keys = [
         "train/success_rate",
         "eval/success_rate",
         *sorted(k for k in all_keys(steps) if k.startswith("train/pass@")),
         *sorted(k for k in all_keys(steps) if k.startswith("eval/pass@")),
     ]
+    kept: list[str] = []
+    for key in keys:
+        _, ys = series(steps, key)
+        if not ys:
+            continue
+        if any(ys == series(steps, other)[1] for other in kept):
+            continue
+        kept.append(key)
+    return kept
 
 
 def plot_run(run_name: str, out_dir: Path = Path("report_plots")) -> None:
     steps = load_run(f"runs/{run_name}.jsonl")
     out_dir.mkdir(exist_ok=True)
 
-    fig, axes = plt.subplots(3, 2, figsize=(11, 11))
+    fig, axes = plt.subplots(3, 2, figsize=(11, 12))
     fig.patch.set_facecolor(SURFACE)
     fig.suptitle(
         f"{run_name} — {len(steps)} logged steps ({min(steps)}–{max(steps)})",
@@ -120,7 +167,7 @@ def plot_run(run_name: str, out_dir: Path = Path("report_plots")) -> None:
     ax = axes[0, 0]
     _draw(ax, steps, reward_keys(steps))
     _style(ax, "reward quality", "success / pass@k", (-0.02, 1.05))
-    ax.legend(fontsize=7, frameon=False, labelcolor=INK_SECONDARY)
+    _legend(ax)
 
     # ---- optimization -----------------------------------------------------
     ax = axes[0, 1]
@@ -136,12 +183,14 @@ def plot_run(run_name: str, out_dir: Path = Path("report_plots")) -> None:
     ])
     ax.axhline(1.0, color=INK_SECONDARY, linewidth=0.8, linestyle=":", label="1.0 (on-policy)")
     _style(ax, "policy drift", "importance weight")
-    ax.legend(fontsize=7, frameon=False, labelcolor=INK_SECONDARY)
+    _legend(ax)
 
     # ---- data health: degenerate groups -----------------------------------
     ax = axes[1, 1]
     _draw(ax, steps, ["train/frac_degenerate_groups"])
-    _style(ax, "data health: degenerate groups", "fraction of groups", (-0.02, 1.05))
+    # A run that never sees a degenerate group sits at 0.0, exactly on the
+    # lower spine; pad below so the line and its markers stay visible.
+    _style(ax, "data health: degenerate groups", "fraction of groups", (-0.05, 1.05))
 
     # ---- data health: entropy (own panel, never a second y-axis) ----------
     ax = axes[2, 0]
@@ -152,7 +201,7 @@ def plot_run(run_name: str, out_dir: Path = Path("report_plots")) -> None:
     ax = axes[2, 1]
     _draw(ax, steps, ["train/step_time_s", "train/update_time_s", "train/rollout_time_s"])
     _style(ax, "timing", "seconds")
-    ax.legend(fontsize=7, frameon=False, labelcolor=INK_SECONDARY)
+    _legend(ax)
 
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     path = out_dir / f"{run_name}_diagnostics.png"
@@ -168,19 +217,19 @@ def plot_compare(run_names: list[str], out_dir: Path = Path("report_plots")) -> 
         ("train/success_rate", "train success rate"),
         ("eval/success_rate", "eval success rate"),
     ]
-    fig, axes = plt.subplots(1, len(panels), figsize=(11, 4))
+    fig, axes = plt.subplots(1, len(panels), figsize=(11, 4.5))
     fig.patch.set_facecolor(SURFACE)
     for ax, (key, title) in zip(axes, panels):
         for i, (name, steps) in enumerate(runs.items()):
-            xs, ys = series(steps, key)
+            xs, ys = series_with_gaps(steps, key)
             color, _, marker = SERIES_STYLE[i % len(SERIES_STYLE)]
-            ax.plot(xs, ys, color=color, linewidth=1.6, marker=marker,
-                    markersize=3.5, label=name)
+            ax.plot(xs, ys, color=color, linewidth=1.4, marker=marker,
+                    markersize=3.2, label=name)
         _style(ax, title, key, (-0.02, 1.05))
-        ax.legend(fontsize=7, frameon=False, labelcolor=INK_SECONDARY)
+        _legend(ax)
     fig.suptitle("REINFORCE vs GRPO on Number Search", color=INK, fontsize=12,
                  x=0.01, ha="left")
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
     path = out_dir / "compare_reinforce_vs_grpo.png"
     fig.savefig(path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
