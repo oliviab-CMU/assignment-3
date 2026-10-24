@@ -66,11 +66,11 @@ quantities.
 
 | | p2a REINFORCE (G=1) | p2b GRPO (G=8) |
 |---|---|---|
-| Eval success rate, step 0 → 50 | 0.34 → 0.46 | 0.42 → 1.00 |
-| Eval success rate at step 10 | 0.32 | 0.93 |
+| Eval success rate, step 0 → 50 | 0.34 → 0.455 (peak 0.465 at step 40) | 0.42 → 0.995 |
+| Eval success rate at step 10 | 0.32 | 0.925 |
 | Eval `pass@4`, step 0 → 50 | 0.78 → 0.84 | 0.84 → 1.00 |
 | Train success rate, steps 40–49 mean | 0.54 | 0.99 |
-| Mean `train/grad_norm` | 0.36 | 0.07 |
+| Mean `train/grad_norm` | 0.357 | 0.074 |
 | `train/entropy_proxy`, first → last step | 0.195 → 0.180 | 0.155 → 0.102 |
 | Steps with nothing to train on | 0 of 50 | 19 of 50 (all rewards identical) |
 | Mean importance weight | 1.000 | 1.000 |
@@ -91,14 +91,15 @@ drift away from 1.0; it does not, so this is the cleanest available check that
 the masking and log-prob alignment work. No episodes were abandoned in either
 run, and the p2a run never had a batch with nothing to learn from.
 
-**GRPO learns much faster and much further.** It goes from 42% to 93% held-out
+**GRPO learns much faster and much further.** It goes from 42% to 92.5% held-out
 success in the first 10 steps and reaches ~99% by step 20, while REINFORCE only
-creeps from 34% to about 46% over all 50 steps. The train-time curves agree:
-GRPO's mean train success rate in the last ten steps is 0.99, versus 0.54 for
-REINFORCE, which still oscillates between roughly 0.1 and 0.9 from batch to
-batch. Note that `pass@4` for REINFORCE (0.84) is far above its `success_rate`
-(0.46): the policy *can* solve the task, it just does so unreliably, which is
-exactly the variance a baseline is supposed to remove.
+creeps from 34% to a peak of 46.5% at step 40 before slipping back to 45.5% at
+step 50. The train-time curves agree: GRPO's mean train success rate in the
+last ten steps is 0.99, versus 0.54 for REINFORCE, which still oscillates
+between roughly 0.1 and 0.9 from batch to batch. Note that `pass@4` for
+REINFORCE (0.84) is far above its `success_rate` (0.455): the policy *can*
+solve the task, it just does so unreliably, which is exactly the variance a
+baseline is supposed to remove.
 
 **Is that difference expected? Yes, and for a concrete reason.** In Number
 Search a task is either solved or not, so a reward is 0 or 1. Under REINFORCE
@@ -113,13 +114,14 @@ budget where there is still something to learn. This is the textbook motivation
 for GRPO, and the handout predicts it.
 
 **Two secondary observations.** First, GRPO's gradient norm is much smaller
-(0.07 vs 0.36) and its entropy proxy falls further (0.155 → 0.102). The smaller
+(0.074 vs 0.357) and its entropy proxy falls further (0.155 → 0.102). The smaller
 gradient is expected because centering removes the large positive rewards that
 dominate an uncentered REINFORCE gradient; the sharper entropy drop is the
 policy becoming confident as it masters the task. Second, GRPO's efficiency
-shows up as *degeneracy*, not as a bug: from step 17 onward most groups have all
-eight rollouts succeeding, so they are correctly skipped. The data-health panel
-climbs to 1.0 and 19 of 50 steps have no training examples at all. That is the
+shows up as *degeneracy*, not as a bug: the degenerate fraction first reaches
+1.0 at step 17, and from then on a typical step has all eight groups with all
+eight rollouts succeeding, so they are correctly skipped. 19 of 50 steps have no
+training examples at all. That is the
 expected end state once a task is solved — there is simply nothing left to learn
 from it — and it also means the late `p2b` eval plateau at ~99% is real rather
 than a stalled run. The `[sanity]` warnings the framework printed about
@@ -127,8 +129,9 @@ degenerate groups are therefore benign here; they would be a real problem only
 if they appeared *early*, before the task was solved.
 
 **Cost.** GRPO costs about 1.6× more wall-clock per step here (35 vs 21.5 min for
-50 steps) because it samples eight times as many episodes per task (7,644 action
-tokens per step vs 845). It is still the better buy: it reaches in 10 steps a
+50 steps) because it samples eight times as many episodes per task (4,739 action
+tokens per step vs 845, roughly a 5.6× increase — less than 8× because a solved
+GRPO episode needs fewer turns). It is still the better buy: it reaches in 10 steps a
 success rate REINFORCE never approaches in 50.
 
 ---
@@ -189,23 +192,25 @@ The run finished with `{'train_steps': 50, 'groups_consumed': 400,
 | Eval success rate at step 20 | 0.99 | 0.645 |
 | Eval `pass@4`, step 0 → 50 | 0.84 → 1.00 | 0.70 → 1.00 |
 | Train success rate, steps 40–49 mean | 0.99 | 0.99 |
-| Mean `train/grad_norm` | 0.07 | 0.08 |
+| Mean `train/grad_norm` | 0.074 | 0.079 |
 | `train/entropy_proxy`, first → last | 0.155 → 0.102 | 0.183 → 0.065 |
 | Steps with nothing to train on | 19 of 50 | 6 of 50 |
 | Importance weight — mean | 1.000 | 1.000 (0.9992–1.0007) |
 | Importance weight — min | 0.549 | 0.389 |
 | Importance weight — max | 2.287 | 2.802 |
 | Importance weight — std | 0.016 (0.013–0.023) | 0.025 (0.015–0.044) |
-| `learner_wait_frac` (median) | 0.68 | 0.21 |
-| Wall-clock for 50 steps | 33.9 min | 21.2 min |
+| `learner_wait_frac` (median, updating steps) | 0.68 | 0.21 |
+| `learner_wait_frac` (median, all steps) | 0.71 | 0.27 |
+| Wall-clock for 50 steps (first to last record) | 35.0 min | 22.4 min |
 
 **Importance weights need to be read as a distribution, not a mean.** The mean
 `ρ` is 1.0000 at every one of the 44 updating steps, which looks like perfectly
 on-policy data — and the mean nearly hides the truth. The tails say otherwise:
 the **minimum** `ρ` per step averages 0.63 and reaches **0.389**, while the
-**maximum** averages 1.53 and reaches **2.80**. In other words, some individual
-tokens were about 2.6× less likely under the training policy than under the
-policy that sampled them, and others up to 2.8× more likely. That is exactly
+**maximum** averages 1.53 and reaches **2.80**. In other words, in the worst
+step some individual token was 2.6× *less* likely under the training policy
+than under the policy that sampled it (1/0.389), and another up to 2.8× more
+likely. That is exactly
 what one expects from a 1–2-version lag: the policy has moved a little, and a
 few token-level ratios move a lot. The mean stays at 1 because for every token
 pushed up another is pushed down. The per-step **std** (median 0.025) is the
@@ -227,24 +232,29 @@ at 0.99. Two things explain that, and neither is a bug. First, `p3` starts lower
 is simply a bit weaker. Second, 8.3% of all generated groups (36 of 436) were
 discarded as stale, so the learner sees somewhat less fresh data per step. It
 still finishes at 0.99 with `pass@4 = 1.00`, and 6 skipped steps versus `p2b`'s
-19 shows it stays useful later into the run. Note the final eval record reports
-`policy_version = 44`, not 50: six skipped steps meant the policy advanced 44
-times over 50 iterations, which is the documented step-versus-version lag and a
-good check that the accounting is right.
+19 shows it stays useful later into the run. Note the last training record
+reports `train/policy_version = 44`, not 50: six skipped steps meant the policy
+advanced 44 times over 50 iterations, which is the documented step-versus-version
+lag and a good check that the accounting is right.
 
 **Speed.** The overlap works. Median `learner_wait_frac` falls from **0.68 to
-0.21** — the learner spends 21% of a step waiting instead of 68%. Total
-wall-clock for the same 50 steps drops from 33.9 to 21.2 minutes, a **1.6×
-speedup**. Measured per *update*, which is the fairer unit because `p2b` had 31
-updates and `p3` had 44, it is 65.7 s → 28.8 s, a **2.3× speedup**.
+0.21** over the steps that actually update — the learner spends 21% of a step
+waiting instead of 68%. (Counting all 50 steps, including ones with no update
+to do, the medians are 0.71 and 0.27; `p3`'s six skipped steps are the last six
+of the run, where the learner has nothing to wait for, so the updating-step
+figure is the honest one for the overlap claim.) Total wall-clock for the same
+50 steps drops from 35.0 to 22.4 minutes, a **1.6× speedup**. Measured per
+*update*, which is the fairer unit because `p2b` had 31 updates and `p3` had 44,
+it is 67.8 s → 30.6 s, a **2.2× speedup**.
 
 The per-update number understates the architectural win and the total number
 overstates it, so both are reported. The reason `p3` is not 3–4× faster overall
-is visible in the timing panel: an async update is *slower* (7.9 s median vs
-4.0 s) because the async server trains on **one** GPU while the colocated sync
-server trains on **two**. Async buys overlap and pays for it with half the
-training hardware — which is the trade the deployment makes by design, and the
-reason `serve_number_search_async.py` exists as a separate server.
+is visible in the timing panel: an async update is *slower* (7.9 s median over
+updating steps vs 4.0 s) because the async server trains on **one** GPU while
+the colocated sync server trains on **two**. Async buys overlap and pays for it
+with half the training hardware — which is the trade the deployment makes by
+design, and the reason `serve_number_search_async.py` exists as a separate
+server.
 
 ### How the agent's behavior changed
 
@@ -266,7 +276,7 @@ t9  "I have used all 10 guesses..."  → no tool call (out of steps)
 
 ```
 t0 337 too high   t1 190 too high   t2 118 too high   t3  75 too low
-t4 141 too high ← outside the surviving interval [75,118]
+t4 141 too high ← outside the surviving interval [76,117]
 t5 108 too high   t6  95 too high   t7  90 too high   t8  80 too low
 t9  85 too high (out of steps)
 ```
@@ -275,36 +285,52 @@ t9  85 too high (out of steps)
 (range 36–927, target 154):
 
 ```
-t0 481 too high  t1 258 too high  t2 147 too low  t3 202 too high
-t4 175 too high  t5 161 too high  t6 154  Correct!
+t0 481 too high  t1 258 too high  t2 146 too low   t3 202 too high
+t4 174 too high  t5 160 too high  t6 153 too low   t7 156 too high
+t8 154  Correct!
 ```
 
 Three concrete changes, each also measurable across the whole run:
 
 1. **From scanning to bisecting.** The early transcript only ever moves uphill
    (558, 790, 906, 964, 991, 1002) and burns eight guesses getting within 90 of
-   the answer. The late one halves the interval each turn. Measured across all
-   transcripts, the median distance of a guess from the midpoint of the
-   surviving interval — as a fraction of the interval width, so 0 is a perfect
-   bisection and 0.5 is a blind guess — falls from **0.145 at step 5 to 0.001 at
-   step 45**. The policy learned the algorithm, not just the format.
+   the answer. The late one halves the interval each turn. To measure this
+   across every logged transcript, each `guess(n)` is scored by its distance
+   from the midpoint of the interval still consistent with the feedback so far,
+   divided by that interval's width. The score is 0 for a perfect bisection, 0.5
+   for a guess at an endpoint, and 0.25 on average for a blind guess. Taking the
+   median over all guesses in one step's directory, it falls from **0.145 at
+   step 5 to 0.001 at step 45**. The policy learned the algorithm, not just the
+   format. (Recompute from `runs/p3_number_search_async_trajectories/`: replay
+   each episode's feedback to get the interval, then take the median of
+   `|n - mid| / width` over the `guess` calls in each `step_NNNNNN/`.)
 
 2. **It stops repeating itself.** At step 5, 6.5% of guesses were a number the
-   agent had already guessed and been told the answer to. That falls to 3.5%,
-   1.6%, and then **0.0%** by step 35. Re-asking a question you already have the
-   answer to is pure waste, and the run learns to stop doing it.
+   agent had already guessed in that episode and been told the answer to. That
+   falls to 3.5% by step 15, 1.8% by step 25, 0.6% by step 30, and **0.0%** at
+   steps 40 and 45. Re-asking a question you already have the answer to is pure
+   waste, and the run learns to stop doing it.
 
-3. **It recovers from its own mistakes — mostly.** The middle transcript guesses
-   141, which the feedback already ruled out (the interval is 75–118). It
-   immediately returns to a valid guess (108) and keeps narrowing. The early
-   agent does not recover at all: when it runs out of steps it ignores the
-   format entirely and writes a sentence, which is rejected as unparseable. The
-   late agent never puts itself in that position. Note that unparsed output is
-   rare at every stage (at most 1.2% of turns), so this is a recovery story, not
-   a formatting-collapse story.
+3. **It recovers from its own mistakes — unevenly.** The middle transcript guesses
+   141, which the feedback already ruled out (after `118 is too high` and
+   `75 is too low` the surviving interval is [76, 117]). It immediately returns
+   to the interval with 108 and keeps narrowing. Not all eight rollouts of that
+   group do as well: one of them, after `82 is too low`, guesses 77, 80, 79, 81
+   and 82 again — all below the interval [83, 92] — and never recovers, and
+   two others spend their last guess just outside an interval that has already
+   collapsed to a single value. The early agent handles this worse still: when
+   it runs out of steps it ignores the format entirely and writes a sentence,
+   which is rejected as unparseable. Note that unparsed output is rare at every
+   stage (at most 1.2% of turns), so this is a recovery story, not a
+   formatting-collapse story.
 
-The `policy_version` in the headers is worth a glance: the step-5 directory
-contains transcripts at versions 2 *and* 3, because a publish landed while those
-groups were rolling out. That is the async behaviour working as intended — each
-group correctly reports the version that actually generated it.
+The `policy_version` in the headers is worth a glance. A step directory is
+filled by whatever training rollouts *finish* during that iteration, and with
+eight workers each captures its policy pair at the top of its own group. So a
+publish landing while several groups are in flight splits one directory across
+versions: step 5 holds 1 episode at version 2, 53 at version 3 and 14 at
+version 4. That is the async behaviour working as intended — each group
+correctly reports the version that actually generated it, and the version a
+group carries is fixed at its start even when a publish happens midway through
+its own eight rollouts.
 
