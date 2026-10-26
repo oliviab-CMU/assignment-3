@@ -15,6 +15,8 @@ seen tokenized, and to `complete` a token prompt.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -277,7 +279,8 @@ class CompletionsServerPolicy(ChatTemplatePolicy):
         if self._client is None:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, headers=headers, timeout=self.timeout
+                base_url=self.base_url, headers=headers, timeout=self.timeout,
+                follow_redirects=True,
             )
         return self._client
 
@@ -306,7 +309,20 @@ class CompletionsServerPolicy(ChatTemplatePolicy):
         }
 
     async def complete(self, prompt_tokens: list[int]) -> Completion:
-        response = await self._http().post("/completions", json=self.request_body(prompt_tokens))
+        import httpx
+
+        body = self.request_body(prompt_tokens)
+        for attempt in range(3):
+            try:
+                response = await self._http().post("/completions", json=body)
+                break
+            except httpx.TimeoutException:
+                if attempt == 2:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "Sampling request timed out; retrying (%d/2)", attempt + 1
+                )
+                await asyncio.sleep(2 ** attempt)
         response.raise_for_status()
         choice = response.json()["choices"][0]
         text = choice.get("text") or ""
