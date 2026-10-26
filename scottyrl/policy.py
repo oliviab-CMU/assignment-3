@@ -312,17 +312,37 @@ class CompletionsServerPolicy(ChatTemplatePolicy):
         import httpx
 
         body = self.request_body(prompt_tokens)
-        for attempt in range(3):
+        # A proxy in front of the server can return a transport-level error
+        # that is not about this request: Modal answers 408 when its proxy
+        # gives up on a long-running request, and 502/503 while a container
+        # cycles. Those deserve a retry like a timeout does; a genuine 4xx
+        # from vLLM (bad model name, malformed body) must not be retried, so
+        # it escapes below through raise_for_status.
+        retryable = (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.RemoteProtocolError,
+        )
+        response = None
+        for attempt in range(5):
             try:
                 response = await self._http().post("/completions", json=body)
-                break
-            except httpx.TimeoutException:
-                if attempt == 2:
+                if response.status_code not in (408, 429) and response.status_code < 500:
+                    break
+                if attempt == 4:
+                    break
+                logging.getLogger(__name__).warning(
+                    "Sampling request returned %d; retrying (%d/4)",
+                    response.status_code, attempt + 1,
+                )
+            except retryable as exc:
+                if attempt == 4:
                     raise
                 logging.getLogger(__name__).warning(
-                    "Sampling request timed out; retrying (%d/2)", attempt + 1
+                    "Sampling request failed (%s); retrying (%d/4)",
+                    type(exc).__name__, attempt + 1,
                 )
-                await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(min(2 ** attempt, 30))
         response.raise_for_status()
         choice = response.json()["choices"][0]
         text = choice.get("text") or ""
